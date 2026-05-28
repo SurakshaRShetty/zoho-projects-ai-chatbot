@@ -1,0 +1,35 @@
+# ── Web Framework ─────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# ── Config & Validation ────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# ── Database ───────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+alembic==1.14.0
+
+# ── HTTP Client ────────────────────────────────────────────────
+httpx==0.28.1
+
+# ── Auth & Security ────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+cryptography==44.0.0
+
+# ── AI / Agent Layer ───────────────────────────────────────────
+langchain>=1.3.0
+langchain-core>=1.4.0
+langchain-groq>=1.1.0          # Groq (free) — default LLM provider
+langchain-anthropic>=0.3.4     # optional: Claude
+langchain-openai>=0.2.14       # optional: OpenAI
+langgraph>=1.2.0               # multi-agent stateful graph
+langchain-community>=0.3.13
+
+# ── Utilities ──────────────────────────────────────────────────
+python-dotenv==1.0.1
+tenacity==9.0.0
+structlog==24.4.0
