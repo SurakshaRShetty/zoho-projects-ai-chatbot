@@ -55,8 +55,8 @@ get_task_utilisation
 ### 2. Clone and install backend dependencies
 
 ```bash
-git clone <repo-url>
-cd zoho-chatbot
+git clone https://github.com/SurakshaRShetty/zoho-projects-ai-chatbot.git
+cd zoho-projects-ai-chatbot
 pip install -r requirements.txt
 ```
 
@@ -87,7 +87,11 @@ npm install
 
 ## OAuth Configuration
 
-1. Go to [https://api-console.zoho.com/](https://api-console.zoho.com/)
+> **India region users:** use [https://api-console.zoho.in/](https://api-console.zoho.in/) and set
+> `ZOHO_ACCOUNTS_URL=https://accounts.zoho.in` and `ZOHO_API_BASE_URL=https://projectsapi.zoho.in` in your `.env`.
+> For all other regions use [https://api-console.zoho.com/](https://api-console.zoho.com/).
+
+1. Go to the Zoho API Console (link above for your region)
 2. Click **Add Client** → choose **Server-based Application**
 3. Set the redirect URI to: `http://localhost:8000/auth/callback`
 4. Copy the **Client ID** and **Client Secret** into your `.env`
