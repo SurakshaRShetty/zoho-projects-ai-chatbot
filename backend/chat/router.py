@@ -68,21 +68,27 @@ async def _save_session_memory(
     messages: list,
 ) -> None:
     """
-    After each turn, persist lightweight long-term memory:
-    last project name + ID mentioned by the assistant.
+    After each turn, persist lightweight long-term memory.
+    Saves: last_active timestamp and last_project (name) from tool results.
     """
+    import json
+    from datetime import datetime
+    from langchain_core.messages import ToolMessage
+
     try:
-        for msg in reversed(messages):
-            if not isinstance(msg, AIMessage):
-                continue
-            content = msg.content if isinstance(msg.content, str) else ""
-            # Look for JSON tool results embedded in prior ToolMessages
-            # Simpler heuristic: if a project id appears, save it
-            if '"id"' in content and '"name"' in content:
-                break
-        # Save last active timestamp as a lightweight signal
-        from datetime import datetime
         await set_memory(db, user_id, "last_active", datetime.utcnow().isoformat())
+
+        # Extract last project name from list_projects tool results
+        for msg in reversed(messages):
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                data = json.loads(msg.content)
+                if isinstance(data, list) and data and "name" in data[0]:
+                    await set_memory(db, user_id, "last_project", data[0]["name"])
+                    break
+            except (json.JSONDecodeError, (KeyError, IndexError, TypeError)):
+                continue
     except Exception as exc:
         logger.warning("memory_save_failed", error=str(exc))
 
