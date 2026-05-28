@@ -35,7 +35,7 @@ get_task_utilisation
 | Frontend | React 18 + Vite + Tailwind CSS |
 | Backend | FastAPI (async) |
 | Agent orchestration | LangGraph 1.x (StateGraph) |
-| LLM | Groq (free) — `llama-3.3-70b-versatile` |
+| LLM | Groq (free) — `llama-3.1-8b-instant` default; set `LLM_MODEL` in `.env` to switch |
 | Auth | Zoho OAuth 2.0 (Authorization Code Grant) |
 | Database | SQLite via async SQLAlchemy |
 | Short-term memory | LangGraph MemorySaver (in-process) |
