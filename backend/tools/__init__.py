@@ -47,7 +47,7 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         raise ValueError(f"Project '{project_id}' not found. Available: {available}")
 
     async def list_project_members(project_id: str) -> str:
-        """List all members of a project with their roles and emails."""
+        """List all members of a project. Pass project name or numeric ID as project_id."""
         project_id = await _resolve_project_id_early(project_id)
         members = await client.list_project_members(project_id)
         return json.dumps(members)
@@ -82,9 +82,12 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
 
     async def _resolve_project_id(project_id: str) -> tuple[str | None, str]:
         """Return (numeric_id, display_name) or (None, error_message)."""
-        if project_id.isdigit():
-            return project_id, project_id
         projects = await client.list_projects()
+        if project_id.isdigit():
+            match = next((p for p in projects if p["id"] == project_id), None)
+            if match:
+                return match["id"], match["name"]
+            return project_id, project_id  # unknown ID, use as-is
         match = next(
             (p for p in projects if p["name"].lower() == project_id.lower()),
             None,
@@ -110,6 +113,23 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         available = ", ".join(t["name"] for t in tasks)
         return None, f"Task '{task_id}' not found. Available tasks: {available}"
 
+    async def _resolve_member_id(project_id: str, assignee: str) -> tuple[str | None, str]:
+        """Resolve member name or ID → (numeric_id, display_name)."""
+        members = await client.list_project_members(project_id)
+        if assignee.isdigit():
+            match = next((m for m in members if m["id"] == assignee), None)
+            if match:
+                return match["id"], match["name"]
+            return assignee, assignee  # unknown ID, use as-is
+        match = next(
+            (m for m in members if m["name"].lower() == assignee.lower()),
+            None,
+        )
+        if match:
+            return match["id"], match["name"]
+        available = ", ".join(m["name"] for m in members)
+        return None, f"Member '{assignee}' not found in project. Available members: {available}"
+
     async def create_task(
         project_id: str,
         name: str,
@@ -123,27 +143,35 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         if project_id is None:
             return project_name  # error message
 
+        resolved_assignee_id = None
+        assignee_display = None
+        if assignee_id:
+            resolved_assignee_id, assignee_display = await _resolve_member_id(project_id, assignee_id)
+            if resolved_assignee_id is None:
+                return assignee_display  # error message
+
         params: dict = {"project_id": project_id, "name": name}
         if description:
             params["description"] = description
-        if assignee_id:
-            params["assignee_id"] = assignee_id
+        if resolved_assignee_id:
+            params["assignee_id"] = resolved_assignee_id  # numeric ID for Zoho API
         if due_date:
             params["due_date"] = due_date
         if priority:
             params["priority"] = priority
 
+        assignee_label = f" assigned to {assignee_display}" if assignee_display else ""
         confirmed = interrupt({
             "tool": "create_task",
             "params": params,
-            "description": f"Create task '{name}' in project '{project_name}'",
+            "description": f"Create task '{name}' in project '{project_name}'{assignee_label}",
         })
         if not confirmed:
             return "Task creation cancelled by user."
         result = await client.create_task(
             project_id, name,
             description=description,
-            assignee_id=assignee_id,
+            assignee_id=resolved_assignee_id,
             due_date=due_date,
             priority=priority,
         )
@@ -164,14 +192,22 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         task_id, task_name = await _resolve_task_id(project_id, task_id)
         if task_id is None:
             return task_name  # error message
+
+        resolved_assignee_id = None
+        assignee_display = None
+        if assignee_id:
+            resolved_assignee_id, assignee_display = await _resolve_member_id(project_id, assignee_id)
+            if resolved_assignee_id is None:
+                return assignee_display  # error message
+
         params: dict = {"project_id": project_id, "task_id": task_id}
         summary: list[str] = []
         if status:
             params["status"] = status
             summary.append(f"status → {status}")
-        if assignee_id:
-            params["assignee_id"] = assignee_id
-            summary.append(f"assignee → {assignee_id}")
+        if resolved_assignee_id:
+            params["assignee_id"] = resolved_assignee_id  # numeric ID for Zoho API
+            summary.append(f"assignee → {assignee_display}")
         if due_date:
             params["due_date"] = due_date
             summary.append(f"due_date → {due_date}")
@@ -189,7 +225,7 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         result = await client.update_task(
             project_id, task_id,
             status=status,
-            assignee_id=assignee_id,
+            assignee_id=resolved_assignee_id,
             due_date=due_date,
             priority=priority,
         )
@@ -221,7 +257,7 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
     )
     _list_members = StructuredTool.from_function(
         coroutine=list_project_members, name="list_project_members",
-        description="List all members of a project with their roles and emails.",
+        description="List all members of a project. Pass the project name or numeric ID as `project_id`.",
     )
 
     query_tools = [
@@ -241,9 +277,15 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         ),
     ]
 
+    _list_tasks_action = StructuredTool.from_function(
+        coroutine=list_tasks, name="list_tasks",
+        description="Look up tasks in a project by name or ID. Use before update_task or delete_task if you need to verify a task exists.",
+    )
+
     action_tools = [
         _list_projects,
         _list_members,
+        _list_tasks_action,
         StructuredTool.from_function(
             coroutine=create_task, name="create_task",
             description="Create a new task in a project. Requires user confirmation. due_date: MM-DD-YYYY. priority: high/medium/low/none.",

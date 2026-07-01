@@ -4,11 +4,12 @@ Wires together: JWT auth → Zoho token refresh → long-term memory →
 multi-agent graph → HIL interrupt handling → long-term memory save.
 """
 
+import asyncio
 import json
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +53,42 @@ def _extract_ai_response(messages: list) -> str:
             except Exception:
                 pass
     return "Done."
+
+
+_ACTION_TOOL_NAMES = {"create_task", "update_task", "delete_task"}
+
+
+def _extract_tool_result(messages: list, preferred_tool: str | None = None) -> str:
+    """After a confirmed HIL action, return the action tool's result string.
+
+    Prefers the ToolMessage whose name matches ``preferred_tool`` (the confirmed
+    action), then falls back to any action tool (create/update/delete), and
+    finally to the last ToolMessage.  This avoids surfacing a subsequent
+    read-only tool call that the LLM may make when summarising the result.
+    """
+    # 1. Exact match on the confirmed tool name
+    if preferred_tool:
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage) and getattr(msg, "name", None) == preferred_tool:
+                content = msg.content
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+
+    # 2. Any action tool result
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage) and getattr(msg, "name", None) in _ACTION_TOOL_NAMES:
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+
+    # 3. Last ToolMessage of any kind
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+
+    return _extract_ai_response(messages)
 
 
 def _format_memory_context(memories: dict[str, str]) -> str | None:
@@ -104,13 +141,12 @@ async def _handle_confirmation(
     user_id: int,
 ) -> ChatResponse:
     """
-    Execute (or cancel) a pending HIL action by reading its params directly
-    from the stored interrupt state — bypasses Command(resume) which breaks
-    when the graph is rebuilt between requests.
+    Resume the interrupted graph with the user's confirm/cancel decision.
+    The graph's own tool re-executes the action on resume — we must NOT
+    call the Zoho API directly here or the action will run twice.
     """
     if not confirmed:
         logger.info("hil_cancelled", user_id=user_id)
-        # Resume graph with False so the checkpoint advances cleanly
         try:
             await graph.ainvoke(Command(resume=False), config=config)
         except Exception:
@@ -121,7 +157,7 @@ async def _handle_confirmation(
             session_id=request.session_id,
         )
 
-    # Read pending interrupt value from the checkpoint
+    # Read interrupt value for logging only — execution is delegated to the graph.
     try:
         state = await graph.aget_state(config)
         iv = None
@@ -145,37 +181,17 @@ async def _handle_confirmation(
     logger.info("hil_confirmed", user_id=user_id, tool=tool, params=params)
 
     try:
-        if tool == "create_task":
-            result = await client.create_task(
-                params["project_id"],
-                params["name"],
-                description=params.get("description"),
-                assignee_id=params.get("assignee_id"),
-                due_date=params.get("due_date"),
-                priority=params.get("priority"),
-            )
-            content = f"Task **'{result.get('name', params['name'])}'** created successfully."
-            if result.get("id"):
-                content += f" (ID: {result['id']})"
-
-        elif tool == "update_task":
-            result = await client.update_task(
-                params["project_id"],
-                params["task_id"],
-                status=params.get("status"),
-                assignee_id=params.get("assignee_id"),
-                due_date=params.get("due_date"),
-                priority=params.get("priority"),
-            )
-            content = f"Task **'{result.get('name', params['task_id'])}'** updated successfully."
-
-        elif tool == "delete_task":
-            await client.delete_task(params["project_id"], params["task_id"])
-            content = f"Task {params['task_id']} deleted successfully."
-
-        else:
-            content = f"Unknown action '{tool}'. Nothing was executed."
-
+        result = await asyncio.wait_for(
+            graph.ainvoke(Command(resume=True), config=config),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("agent_timeout", user_id=user_id)
+        return ChatResponse(
+            type="error",
+            content="The request took too long. Please try again.",
+            session_id=request.session_id,
+        )
     except Exception as exc:
         logger.error("hil_action_failed", tool=tool, error=str(exc))
         return ChatResponse(
@@ -184,12 +200,8 @@ async def _handle_confirmation(
             session_id=request.session_id,
         )
 
-    # Advance the graph checkpoint so the session stays consistent
-    try:
-        await graph.ainvoke(Command(resume=True), config=config)
-    except Exception:
-        pass
-
+    messages = result.get("messages", [])
+    content = _extract_tool_result(messages, preferred_tool=tool)
     logger.info("hil_action_success", tool=tool, user_id=user_id)
     return ChatResponse(type="message", content=content, session_id=request.session_id)
 
@@ -227,7 +239,10 @@ async def chat(
     query_tools, action_tools = make_zoho_tools(client)
     graph, _ = build_graph(query_tools, action_tools)
 
-    config = {"configurable": {"thread_id": _thread_id(current_user.id, request.session_id)}}
+    config = {
+        "configurable": {"thread_id": _thread_id(current_user.id, request.session_id)},
+        "recursion_limit": 20,
+    }
 
     # ── Confirmed / cancelled: execute directly from stored interrupt ──
     if request.confirmed is not None:
@@ -243,12 +258,22 @@ async def chat(
 
     # ── Normal message: invoke graph ───────────────────────────
     try:
-        result = await graph.ainvoke(
-            {
-                "messages": [HumanMessage(content=request.message)],
-                "memory_context": memory_context,
-            },
-            config=config,
+        result = await asyncio.wait_for(
+            graph.ainvoke(
+                {
+                    "messages": [HumanMessage(content=request.message)],
+                    "memory_context": memory_context,
+                },
+                config=config,
+            ),
+            timeout=45.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("agent_timeout", user_id=current_user.id)
+        return ChatResponse(
+            type="error",
+            content="The request took too long. Please try again with a simpler query.",
+            session_id=request.session_id,
         )
     except Exception as exc:
         logger.error("agent_error", user_id=current_user.id, error=str(exc))

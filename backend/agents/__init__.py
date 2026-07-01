@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Annotated, Literal, Optional
 
 import structlog
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -41,14 +41,19 @@ QUERY_SYSTEM = """\
 You are the Query Agent for a Zoho Projects assistant. You ONLY read and report data — never write.
 
 Tools:
-- list_projects          → list all projects
-- list_tasks             → list tasks with optional filters (status, assignee, due_date)
+- list_projects          → list all projects with their status and description
+- list_tasks             → list tasks in a project with optional filters (status, assignee, due_date)
 - get_task_details       → full details of a single task
 - list_project_members   → all members of a project with roles
 - get_task_utilisation   → task load summary per member
 
 Rules:
-• Resolve project names to IDs with list_projects before other calls.
+• If the user asks about PROJECTS (list projects, show projects, what are my projects), call list_projects ONLY — do NOT call list_tasks.
+• If the user asks about TASKS, call list_projects first (to resolve the project ID), then call list_tasks.
+• If the user asks about workload, utilisation, task load, or per-member stats, call get_task_utilisation ONLY — do NOT call list_tasks.
+• Call each tool EXACTLY ONCE per request. Never call the same tool twice.
+• If the user does not specify a status, call list_tasks with NO status filter to get all tasks.
+• If list_tasks returns 0 tasks, report "No tasks found" — do NOT retry or call list_tasks again.
 • Present results with bullet points or short tables.
 • Never attempt to create, update, or delete anything.
 """
@@ -67,8 +72,10 @@ Rules:
 • Use create_task ONLY when the user asks to create or add a new task.
 • Use update_task when the user asks to change, update, edit, or modify an existing task.
 • Use delete_task when the user asks to delete or remove an existing task.
+• Call each tool AT MOST ONCE per request. Never repeat the same tool call.
 • Pass task names directly — they are resolved to IDs automatically. Do NOT invent or guess task IDs.
-• If a tool returns an error saying a task is not found, retry using the exact task name from the list.
+• If a tool returns an error (member not found, task not found, etc.), STOP immediately and report the exact error to the user. Do NOT call any more tools.
+• If an assignee name is not found in list_project_members results, tell the user which members ARE available. Do NOT call create_task or update_task.
 • due_date format: MM-DD-YYYY | priority: high / medium / low / none
 """
 
@@ -191,6 +198,18 @@ def build_graph(query_tools: list, action_tools: list):
             return "action_tools"
         return END
 
+    _WRITE_TOOL_NAMES = {"create_task", "update_task", "delete_task"}
+
+    def action_tools_next(state: AgentState) -> str:
+        """After action_tools: END immediately if a write op just completed.
+        This prevents a second LLM call that tends to loop or produce errors."""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, ToolMessage):
+                if getattr(msg, "name", None) in _WRITE_TOOL_NAMES:
+                    return END
+                break
+        return "action_agent"
+
     # ── Assemble graph ────────────────────────────────────────
 
     builder = StateGraph(AgentState)
@@ -199,7 +218,7 @@ def build_graph(query_tools: list, action_tools: list):
     builder.add_node("query_agent",  query_agent)
     builder.add_node("query_tools",  ToolNode(query_tools,  handle_tool_errors=True))
     builder.add_node("action_agent", action_agent)
-    builder.add_node("action_tools", ToolNode(action_tools))
+    builder.add_node("action_tools", ToolNode(action_tools, handle_tool_errors=True))
 
     builder.add_edge(START, "router")
 
@@ -215,7 +234,11 @@ def build_graph(query_tools: list, action_tools: list):
         action_next,
         {"action_tools": "action_tools", END: END},
     )
-    builder.add_edge("action_tools", "action_agent")
+    builder.add_conditional_edges(
+        "action_tools",
+        action_tools_next,
+        {"action_agent": "action_agent", END: END},
+    )
 
     graph = builder.compile(checkpointer=checkpointer)
     return graph, checkpointer

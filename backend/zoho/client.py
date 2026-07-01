@@ -224,23 +224,36 @@ class ZohoClient:
             }
             for m in members
         }
+        def _match_member(assignee: str) -> str:
+            """Match a task assignee name to a members-dict key.
+            Zoho task owners sometimes return first-name only; members use full name."""
+            if assignee in stats:
+                return assignee
+            al = assignee.lower()
+            for key in stats:
+                kl = key.lower()
+                if kl.startswith(al) or al.startswith(kl):
+                    return key
+            return assignee  # unmatched — will create an "Unassigned" bucket
+
         for task in tasks:
             assignee = task.get("assignee", "Unassigned")
-            if assignee not in stats:
-                stats[assignee] = {
+            key = _match_member(assignee)
+            if key not in stats:
+                stats[key] = {
                     "member_id": "",
-                    "name": assignee,
+                    "name": key,
                     "email": "",
                     "role": "",
                     "total_tasks": 0,
                     "open_tasks": 0,
                     "closed_tasks": 0,
                 }
-            stats[assignee]["total_tasks"] += 1
+            stats[key]["total_tasks"] += 1
             if task.get("status", "").lower() in ("open", "in progress", "to do"):
-                stats[assignee]["open_tasks"] += 1
+                stats[key]["open_tasks"] += 1
             else:
-                stats[assignee]["closed_tasks"] += 1
+                stats[key]["closed_tasks"] += 1
         return sorted(stats.values(), key=lambda x: x["total_tasks"], reverse=True)
 
     # ── Formatter ─────────────────────────────────────────────
