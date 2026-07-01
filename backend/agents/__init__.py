@@ -198,6 +198,19 @@ def build_graph(query_tools: list, action_tools: list):
             return "action_tools"
         return END
 
+    _DIRECT_RESPONSE_TOOLS = {"get_task_utilisation"}
+
+    def query_tools_next(state: AgentState) -> str:
+        """After query_tools: END immediately for tools whose output is already
+        a final, formatted answer (no LLM summarisation needed). All other query
+        tools still route back to query_agent as before."""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, ToolMessage):
+                if getattr(msg, "name", None) in _DIRECT_RESPONSE_TOOLS:
+                    return END
+                break
+        return "query_agent"
+
     _WRITE_TOOL_NAMES = {"create_task", "update_task", "delete_task"}
 
     def action_tools_next(state: AgentState) -> str:
@@ -227,7 +240,11 @@ def build_graph(query_tools: list, action_tools: list):
         query_next,
         {"query_tools": "query_tools", END: END},
     )
-    builder.add_edge("query_tools", "query_agent")
+    builder.add_conditional_edges(
+        "query_tools",
+        query_tools_next,
+        {"query_agent": "query_agent", END: END},
+    )
 
     builder.add_conditional_edges(
         "action_agent",

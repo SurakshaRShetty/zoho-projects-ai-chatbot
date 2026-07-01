@@ -52,6 +52,11 @@ def _extract_ai_response(messages: list) -> str:
                 return json.dumps(content)
             except Exception:
                 pass
+    # No AIMessage with content — e.g. a query tool (like get_task_utilisation)
+    # that ends the graph directly with an already-formatted ToolMessage.
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage) and isinstance(msg.content, str) and msg.content.strip():
+            return msg.content.strip()
     return "Done."
 
 

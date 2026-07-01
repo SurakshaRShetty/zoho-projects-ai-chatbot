@@ -76,7 +76,14 @@ def make_zoho_tools(client: ZohoClient) -> tuple[list, list]:
         """Get task workload statistics per team member: open, closed, and total counts."""
         project_id = await _resolve_project_id_early(project_id)
         stats = await client.get_task_utilisation(project_id)
-        return json.dumps(stats)
+        logger.info("tool_get_task_utilisation", project_id=project_id, count=len(stats))
+        if not stats:
+            return "No task data found for this project."
+        return "\n".join(
+            f"- **{s['name']}** — {s['total_tasks']} tasks "
+            f"({s['open_tasks']} open, {s['closed_tasks']} closed)"
+            for s in stats
+        )
 
     # ── Action tools (write + HIL) ─────────────────────────────
 
